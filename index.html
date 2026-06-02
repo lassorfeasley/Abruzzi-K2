@@ -399,6 +399,7 @@ const GLACIER_AT = {14:3, 15:5, 16:7, 17:9, 18:9, 19:11, 20:14, 21:18, 22:18, 23
 /* ---------- State ---------- */
 let current = 0;
 let playing = false;
+let paused = false;    // true only when user explicitly pauses — freezes camera animations
 let playTimer = null;
 let map = null;
 let markers = [];
@@ -887,9 +888,8 @@ function flyToDay(n, animate=true){
   const aIdx=dayIdx[fromDay], bIdx=dayIdx[n];
   if(routeReady && aIdx!=null && bIdx!=null && aIdx!==bIdx){
     const len=Math.abs(cumDist[bIdx]-cumDist[aIdx]);
-    const dur=Math.max(2000, mphDuration(len));
-    pathFollowAnim(aIdx, bIdx, dur, target, ()=>{ if(isLast) startOrbit(target); });
-    return dur;
+    pathFollowAnim(aIdx, bIdx, len, target, ()=>{ if(isLast) startOrbit(target); });
+    return Math.max(2000, mphDuration(len));
   }
 
   // Otherwise (rest day, or route not loaded yet) → smooth straight settle.
@@ -899,29 +899,29 @@ function flyToDay(n, animate=true){
   return dur;
 }
 
-// Fly the camera along the route between two indices, looking down-trail, then
-// settle into the adaptive waypoint framing (which clears ridges) at the end.
-function pathFollowAnim(aIdx, bIdx, dur, target, onEnd){
+// Fly the camera along the route between two indices, looking down-trail.
+// Uses a real-time distance-based model: each frame advances by (elapsed × mph),
+// so speed changes and pause take effect instantly.
+function pathFollowAnim(aIdx, bIdx, totalKm, target, onEnd){
   const dir = bIdx>=aIdx ? 1 : -1;
-  const dA=cumDist[aIdx], total=Math.abs(cumDist[bIdx]-dA);
+  const dA=cumDist[aIdx];
   const lo=Math.min(cumDist[aIdx],cumDist[bIdx]), hi=Math.max(cumDist[aIdx],cumDist[bIdx]);
-  const lookKm=clamp(total*0.05, 0.8, 4);
-  const start=performance.now();
+  const lookKm=clamp(totalKm*0.05, 0.8, 4);
   const startView={...camView};
+  let travelledKm=0, lastT=performance.now();
   function frame(t){
-    const k=clamp((t-start)/dur,0,1), e=easeInOutCubic(k);
-    const dist=dA + dir*e*total;
+    if(paused){ lastT=t; camRAF=requestAnimationFrame(frame); return; }
+    const dt=(t-lastT)/1000; lastT=t;
+    travelledKm += (currentMph()*1.60934/3600)*dt*1000; // mph→km/s, dt is seconds
+    const k=clamp(travelledKm/totalKm, 0, 1);
+    const dist=dA + dir*k*totalKm;
     const p=pointAtDist(dist);
     const pa=pointAtDist(clamp(dist + dir*lookKm, lo, hi));
     let bearing = (pa[0]===p[0]&&pa[1]===p[1]) ? startView.bearing : bearingTo([p[0],p[1]],[pa[0],pa[1]]);
-    // hug the ground but clear the immediate rise ahead
     const alt = Math.max(groundVisual([p[0],p[1]],p[2]), groundVisual([pa[0],pa[1]],pa[2])) + EYE_M;
-    // tilt to follow the terrain slope in the direction of travel
     const pitch = topoPitch([p[0],p[1]], p[2], [pa[0],pa[1]], pa[2]);
     let v={lng:p[0], lat:p[1], alt, pitch, bearing};
-    // ease out of the previous view at the very start to avoid a snap
     if(k<0.12){ const b=k/0.12; v.bearing=lerpAngle(startView.bearing,v.bearing,b); v.alt=lerp(startView.alt,v.alt,b); v.pitch=lerp(startView.pitch,v.pitch,b); }
-    // ease into the adaptive waypoint framing for the last stretch
     if(target && k>0.8){
       const b=easeInOutCubic((k-0.8)/0.2);
       v={ lng:lerp(v.lng,target.lng,b), lat:lerp(v.lat,target.lat,b), alt:lerp(v.alt,target.alt,b),
@@ -935,9 +935,11 @@ function pathFollowAnim(aIdx, bIdx, dur, target, onEnd){
 
 // Smooth straight-line settle between two views (rest days / pre-route fallback).
 function viewLerpAnim(from, target, dur, onEnd){
-  const start=performance.now();
+  let elapsed=0, lastT=performance.now();
   function frame(t){
-    const k=clamp((t-start)/dur,0,1), e=easeInOutCubic(k);
+    if(paused){ lastT=t; camRAF=requestAnimationFrame(frame); return; }
+    elapsed += t-lastT; lastT=t;
+    const k=clamp(elapsed/dur,0,1), e=easeInOutCubic(k);
     const v={
       lng:lerp(from.lng,target.lng,e), lat:lerp(from.lat,target.lat,e),
       alt:lerp(from.alt,target.alt,e), pitch:lerp(from.pitch,target.pitch,e),
@@ -952,12 +954,15 @@ function viewLerpAnim(from, target, dur, onEnd){
 // Slow orbit around the K2 view once Base Camp is reached: the camera revolves
 // ~30° around a pivot ahead while keeping the great peak in frame.
 function startOrbit(view){
-  const pivot=destPoint([view.lng,view.lat], view.bearing, 4); // ~4km ahead (toward K2)
+  const pivot=destPoint([view.lng,view.lat], view.bearing, 4);
   const radiusKm=distanceKm([view.lng,view.lat], pivot);
-  const startBrng=(view.bearing+180)%360; // bearing from pivot back to camera
-  const span=Math.max(6000, mphDuration(5)), sweep=30, t0=performance.now();
+  const startBrng=(view.bearing+180)%360;
+  const span=Math.max(6000, mphDuration(5)), sweep=30;
+  let elapsed=0, lastT=performance.now();
   function frame(t){
-    const k=clamp((t-t0)/span,0,1), e=easeInOutCubic(k);
+    if(paused){ lastT=t; orbitRAF=requestAnimationFrame(frame); return; }
+    elapsed+=t-lastT; lastT=t;
+    const k=clamp(elapsed/span,0,1), e=easeInOutCubic(k);
     const b=startBrng + sweep*e;
     const camLL=destPoint(pivot, b, radiusKm);
     applyView({lng:camLL[0], lat:camLL[1], alt:view.alt, pitch:view.pitch, bearing:(b+180)%360});
@@ -980,7 +985,7 @@ function prevDay(){ if(current>0) goToDay(current-1); }
 
 function startPlay(){
   if(current===waypoints.length-1) goToDay(0);
-  playing=true;
+  playing=true; paused=false;
   playBtn.querySelector('.ico').textContent='⏸';
   playBtn.lastChild.textContent=' Pause';
   playBtn.classList.add('active');
@@ -999,13 +1004,31 @@ function scheduleStep(delay){
   }, delay);
 }
 function stopPlay(){
-  playing=false;
+  playing=false; paused=false;
   playBtn.querySelector('.ico').textContent='▶';
   playBtn.lastChild.textContent=' Play';
   playBtn.classList.remove('active');
   if(playTimer){clearTimeout(playTimer);playTimer=null;}
 }
-function togglePlay(){ playing?stopPlay():startPlay(); }
+function togglePlay(){
+  if(playing && !paused){
+    // Pause: freeze animations, stop scheduling new legs.
+    paused=true;
+    if(playTimer){clearTimeout(playTimer);playTimer=null;}
+    playBtn.querySelector('.ico').textContent='▶';
+    playBtn.lastChild.textContent=' Play';
+    playBtn.classList.remove('active');
+  } else if(playing && paused){
+    // Resume from pause.
+    paused=false;
+    playBtn.querySelector('.ico').textContent='⏸';
+    playBtn.lastChild.textContent=' Pause';
+    playBtn.classList.add('active');
+    scheduleStep(800);
+  } else {
+    startPlay();
+  }
+}
 
 /* ---------- Ambient UI: reveal controls on activity, hide when idle ---------- */
 let uiHideTimer=null;
