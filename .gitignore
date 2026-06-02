@@ -1,6 +1,6 @@
 # Local secrets / environment
 .env
-config.js
+/config.js
 
 # OS / editor cruft
 .DS_Store
