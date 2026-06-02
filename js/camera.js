@@ -68,16 +68,45 @@ export function applySky() {
 
 export function toggleMode() { state.isNight = !state.isNight; applySky(); }
 
-// Adjusts the target speed index and re-frames the camera when settled.
-// The HUD speed label is refreshed by the caller (ui.js) so this stays free of
-// any UI dependency.
+// Adjusts the target speed index and re-frames the camera so altitude tracks
+// speed. During an active leg the path animation already eases altitude via
+// smoothMph; in every other state (stopped, paused, or dwelling between legs)
+// we run a dedicated reframe. The HUD speed label is refreshed by the caller
+// (ui.js) so this stays free of any UI dependency.
 export function changeSpeed(delta) {
   state.mphIdx = clamp(state.mphIdx + delta, 0, MPH_STEPS.length - 1);
-  if (state.map && state.camView && !state.playing) {
-    if (state.camRAF) { cancelAnimationFrame(state.camRAF); state.camRAF = null; }
-    const v = computeView(state.current, currentMph());
-    viewLerpAnim({ ...state.camView }, v, 800);
+  const activeLeg = state.playing && !state.paused;
+  if (state.map && state.camView && !activeLeg) reframeForSpeed();
+}
+
+// Ease the camera to the altitude/framing for the current speed. Runs
+// independently of the `paused` flag so a paused camera still responds.
+function reframeForSpeed() {
+  if (!state.map || !state.camView) return;
+  if (state.camRAF) { cancelAnimationFrame(state.camRAF); state.camRAF = null; }
+  const from = { ...state.camView };
+  const dur = 800;
+  let elapsed = 0;
+  let lastT = performance.now();
+  function frame(t) {
+    const dt = (t - lastT) / 1000;
+    elapsed += t - lastT;
+    lastT = t;
+    tickSmooth(dt);
+    const target = computeView(state.current, currentMph());
+    const k = clamp(elapsed / dur, 0, 1);
+    const e = easeInOutCubic(k);
+    const v = {
+      lng: lerp(from.lng, target.lng, e), lat: lerp(from.lat, target.lat, e),
+      alt: lerp(from.alt, target.alt, e), pitch: lerp(from.pitch, target.pitch, e),
+      bearing: lerpAngle(from.bearing, target.bearing, e)
+    };
+    applyView(v);
+    state.camView = v;
+    if (k < 1) state.camRAF = requestAnimationFrame(frame);
+    else state.camRAF = null;
   }
+  state.camRAF = requestAnimationFrame(frame);
 }
 
 function groundVisual(lngLat, fallbackRealElev) {
