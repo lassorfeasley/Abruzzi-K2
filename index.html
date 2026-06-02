@@ -161,8 +161,8 @@ body.ui-active #hud{opacity:1;transform:none;pointer-events:auto;}
 .settings{display:flex;align-items:center;justify-content:flex-end;gap:7px;margin-bottom:7px;}
 .set-cap{font-family:'EB Garamond',serif;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;
   color:#d8c8a4;text-shadow:0 1px 6px rgba(0,0,0,.7);margin-right:2px;}
-.chip-val{font-family:'Playfair Display',serif;font-size:14px;color:#f1e6cc;min-width:38px;text-align:center;
-  text-shadow:0 1px 6px rgba(0,0,0,.7);}
+.chip-val{font-family:'Playfair Display',serif;font-size:13px;color:#f1e6cc;min-width:62px;text-align:center;
+  text-shadow:0 1px 6px rgba(0,0,0,.7);white-space:nowrap;}
 .chip{width:30px;height:30px;border-radius:4px;cursor:pointer;font-size:15px;line-height:1;
   color:#ead4a1;background:rgba(245,239,224,.04);
   border:1px solid rgba(201,168,76,.5);text-shadow:0 1px 6px rgba(0,0,0,.65);
@@ -292,7 +292,7 @@ body.mode-day .mapboxgl-canvas{filter:sepia(0.16) saturate(0.95) brightness(1.05
       <div class="settings">
         <span class="set-cap">Speed</span>
         <button class="chip" id="slowBtn" aria-label="Slower">−</button>
-        <span class="chip-val" id="speedLabel">1×</span>
+        <span class="chip-val" id="speedLabel">30 mph</span>
         <button class="chip" id="fastBtn" aria-label="Faster">+</button>
         <button class="chip mode" id="modeBtn" aria-label="Switch to day">☾</button>
       </div>
@@ -447,18 +447,36 @@ function toast(msg){ toastEl.textContent=msg; toastEl.classList.add('show'); set
    the view feels like standing on the trail looking out across the scenery.
    Tune these to taste. */
 const EYE_M       = 200;   // camera height above the ground in metres (~650 ft)
-const CAM_PITCH   = 83;    // near-horizon gaze (90 = dead level); controls how much sky shows
 const BACK_KM     = 1.1;   // sit behind each waypoint so the spot & valley read in the foreground
 const TERRAIN_EXAG= 1.35;  // must match map.setTerrain exaggeration (gentler = fewer "walls" at ground level)
+const PITCH_BASE  = 83;    // neutral gaze (near-horizon) when terrain is flat
+const PITCH_LO    = 60;    // max downward tilt (descending steep terrain — shows more ground)
+const PITCH_HI    = 85;    // max upward tilt (ascending steep terrain — shows more sky/peaks)
+
+// Tilt the camera to follow the terrain slope: ascending ⇒ higher pitch (look
+// up toward peaks), descending ⇒ lower pitch (look down into the valley). The
+// slope is computed from exaggerated terrain so it matches what's on screen.
+// Result stays in [PITCH_LO, PITCH_HI] — safe for Mapbox's FreeCamera.
+function topoPitch(fromLL, fromElev, toLL, toElev){
+  const distM = Math.max(1, distanceKm(fromLL, toLL) * 1000);
+  const g0 = groundVisual(fromLL, fromElev);
+  const g1 = groundVisual(toLL, toElev);
+  const slopeDeg = Math.atan2(g1 - g0, distM) * 180 / Math.PI;
+  // Map slope (roughly ±30° range) into our pitch band.
+  const t = clamp(slopeDeg / 30, -1, 1);
+  if(t >= 0) return lerp(PITCH_BASE, PITCH_HI, t);
+  return lerp(PITCH_BASE, PITCH_LO, -t);
+}
 const STEP_MIN_MS = 3000;
-const STEP_MAX_MS = 7500;
 const DWELL_MS    = 1600;  // pause on each waypoint during auto-play
-const BASE_SCALE  = 20;    // base slowdown of camera motion (5% of original speed)
-const SPEED_STEPS = [0.25, 0.5, 1, 2, 4, 8];  // playback-speed multipliers (higher = faster)
-let speedIdx = 2;          // index into SPEED_STEPS (default 1×)
-// Effective duration scale: faster playback ⇒ shorter motions.
-function effScale(){ return BASE_SCALE / SPEED_STEPS[speedIdx]; }
-function loopPauseMs(){ return 9000 * effScale(); }
+/* Speed is expressed in miles per hour — the camera "walks" along the route at
+   this pace. Duration of each leg = routeDistance / speed.                     */
+const MPH_STEPS = [2, 5, 15, 30, 60, 120, 300, 600];
+let mphIdx = 3;            // default 30 mph
+function currentMph(){ return MPH_STEPS[mphIdx]; }
+// Duration (ms) to travel `km` at the current mph.
+function mphDuration(km){ return (km / (currentMph() * 1.60934)) * 3600 * 1000; }
+function loopPauseMs(){ return mphDuration(10); }   // ~10 km dwell worth of time
 
 /* ---------- Sky: night (starfield) vs day (blue atmosphere) ---------- */
 let isNight = true;
@@ -476,14 +494,12 @@ function applySky(){
 function toggleMode(){ isNight=!isNight; applySky(); }
 
 /* ---------- Playback speed ---------- */
-function fmtSpeed(m){ return m + '×'; }
 function updateSpeedUI(){
-  if(typeof speedLabel!=='undefined' && speedLabel) speedLabel.textContent = fmtSpeed(SPEED_STEPS[speedIdx]);
-  if(typeof slowBtn!=='undefined' && slowBtn) slowBtn.disabled = (speedIdx===0);
-  if(typeof fastBtn!=='undefined' && fastBtn) fastBtn.disabled = (speedIdx===SPEED_STEPS.length-1);
+  if(typeof speedLabel!=='undefined' && speedLabel) speedLabel.textContent = currentMph() + ' mph';
+  if(typeof slowBtn!=='undefined' && slowBtn) slowBtn.disabled = (mphIdx===0);
+  if(typeof fastBtn!=='undefined' && fastBtn) fastBtn.disabled = (mphIdx===MPH_STEPS.length-1);
 }
-function changeSpeed(delta){ speedIdx=clamp(speedIdx+delta, 0, SPEED_STEPS.length-1); updateSpeedUI(); }
-function travelDuration(km){ return clamp(2800 + km*16, STEP_MIN_MS, STEP_MAX_MS); }
+function changeSpeed(delta){ mphIdx=clamp(mphIdx+delta, 0, MPH_STEPS.length-1); updateSpeedUI(); }
 
 const lerp=(a,b,t)=>a+(b-a)*t;
 function lerpAngle(a,b,t){ let d=((b-a+540)%360)-180; return a+d*t; }
@@ -518,7 +534,9 @@ function computeView(n){
     maxAhead = Math.max(maxAhead, groundVisual(destPoint(w.coords, bearing, d), w.elev));
   }
   alt = Math.max(alt, maxAhead + 80);
-  return {lng:camLL[0], lat:camLL[1], alt, pitch:CAM_PITCH, bearing};
+  // Tilt to match the terrain slope ahead (toward the look direction).
+  const pitch = topoPitch(camLL, w.elev, destPoint(w.coords, bearing, 1.0), w.elev);
+  return {lng:camLL[0], lat:camLL[1], alt, pitch, bearing};
 }
 function applyView(v){
   const opts = map.getFreeCameraOptions();
@@ -869,14 +887,14 @@ function flyToDay(n, animate=true){
   const aIdx=dayIdx[fromDay], bIdx=dayIdx[n];
   if(routeReady && aIdx!=null && bIdx!=null && aIdx!==bIdx){
     const len=Math.abs(cumDist[bIdx]-cumDist[aIdx]);
-    const dur=clamp(len*75, STEP_MIN_MS, 9000)*effScale();
+    const dur=Math.max(2000, mphDuration(len));
     pathFollowAnim(aIdx, bIdx, dur, target, ()=>{ if(isLast) startOrbit(target); });
     return dur;
   }
 
   // Otherwise (rest day, or route not loaded yet) → smooth straight settle.
   const km=distanceKm(waypoints[fromDay].coords, waypoints[n].coords);
-  const dur = (aIdx===bIdx ? 1100 : travelDuration(km))*effScale();
+  const dur = aIdx===bIdx ? 1100 : Math.max(2000, mphDuration(km));
   viewLerpAnim({...camView}, target, dur, ()=>{ if(isLast) startOrbit(target); });
   return dur;
 }
@@ -898,9 +916,11 @@ function pathFollowAnim(aIdx, bIdx, dur, target, onEnd){
     let bearing = (pa[0]===p[0]&&pa[1]===p[1]) ? startView.bearing : bearingTo([p[0],p[1]],[pa[0],pa[1]]);
     // hug the ground but clear the immediate rise ahead
     const alt = Math.max(groundVisual([p[0],p[1]],p[2]), groundVisual([pa[0],pa[1]],pa[2])) + EYE_M;
-    let v={lng:p[0], lat:p[1], alt, pitch:CAM_PITCH, bearing};
+    // tilt to follow the terrain slope in the direction of travel
+    const pitch = topoPitch([p[0],p[1]], p[2], [pa[0],pa[1]], pa[2]);
+    let v={lng:p[0], lat:p[1], alt, pitch, bearing};
     // ease out of the previous view at the very start to avoid a snap
-    if(k<0.12){ const b=k/0.12; v.bearing=lerpAngle(startView.bearing,v.bearing,b); v.alt=lerp(startView.alt,v.alt,b); }
+    if(k<0.12){ const b=k/0.12; v.bearing=lerpAngle(startView.bearing,v.bearing,b); v.alt=lerp(startView.alt,v.alt,b); v.pitch=lerp(startView.pitch,v.pitch,b); }
     // ease into the adaptive waypoint framing for the last stretch
     if(target && k>0.8){
       const b=easeInOutCubic((k-0.8)/0.2);
@@ -935,7 +955,7 @@ function startOrbit(view){
   const pivot=destPoint([view.lng,view.lat], view.bearing, 4); // ~4km ahead (toward K2)
   const radiusKm=distanceKm([view.lng,view.lat], pivot);
   const startBrng=(view.bearing+180)%360; // bearing from pivot back to camera
-  const span=9000*effScale(), sweep=30, t0=performance.now();
+  const span=Math.max(6000, mphDuration(5)), sweep=30, t0=performance.now();
   function frame(t){
     const k=clamp((t-t0)/span,0,1), e=easeInOutCubic(k);
     const b=startBrng + sweep*e;
@@ -989,18 +1009,27 @@ function togglePlay(){ playing?stopPlay():startPlay(); }
 
 /* ---------- Ambient UI: reveal controls on activity, hide when idle ---------- */
 let uiHideTimer=null;
+const UI_TIMEOUT = 4000;
 function showUI(){
   document.body.classList.add('ui-active');
   clearTimeout(uiHideTimer);
-  uiHideTimer=setTimeout(()=>document.body.classList.remove('ui-active'), 2600);
+  uiHideTimer=setTimeout(()=>document.body.classList.remove('ui-active'), UI_TIMEOUT);
+}
+function keepUI(){
+  document.body.classList.add('ui-active');
+  clearTimeout(uiHideTimer);
 }
 function setupAmbientUI(){
   ['mousemove','pointerdown','touchstart','wheel'].forEach(ev=>
     window.addEventListener(ev, showUI, {passive:true}));
-  // Keep controls visible while the pointer is over them.
   const hud=$('hud');
-  if(hud){ hud.addEventListener('pointerenter',()=>{clearTimeout(uiHideTimer);document.body.classList.add('ui-active');});
-           hud.addEventListener('pointerleave',showUI); }
+  if(hud){
+    hud.addEventListener('pointerenter', keepUI);
+    hud.addEventListener('pointerleave', showUI);
+    // Any click inside the HUD keeps it visible so button presses aren't
+    // swallowed by the fade-out timer.
+    hud.addEventListener('click', ()=>{ keepUI(); setTimeout(showUI, 600); });
+  }
 }
 
 /* ---------- UI bindings ---------- */
