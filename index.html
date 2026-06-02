@@ -454,8 +454,27 @@ function toast(msg){ toastEl.textContent=msg; toastEl.classList.add('show'); set
    a fixed height above the terrain and given an explicit near-horizon pitch, so
    the view feels like standing on the trail looking out across the scenery.
    Tune these to taste. */
-const EYE_M       = 200;   // camera height above the ground in metres (~650 ft)
-const BACK_KM     = 1.1;   // sit behind each waypoint so the spot & valley read in the foreground
+// Camera height and pull-back scale with speed: at walking pace (5 mph) the
+// lens sits ~25 ft above the ground for an immersive trail feel; at top speed
+// it rises to ~1,000 ft for a sweeping aerial view.  Power curve anchored at
+// 5 mph → 25 ft and 600 mph → 1,000 ft.
+// `smoothMph` eases toward the target so speed/altitude transitions feel fluid.
+let smoothMph = 30;          // initialised to default MPH_STEPS[3]
+const SMOOTH_RATE = 3;       // exp-decay rate: ~95 % converged in 1 s
+function tickSmooth(dt){
+  const tgt = currentMph();
+  if(Math.abs(smoothMph - tgt) < 0.05){ smoothMph = tgt; return; }
+  smoothMph += (tgt - smoothMph) * (1 - Math.exp(-SMOOTH_RATE * dt));
+}
+function eyeMetresFor(mph){
+  return 6.54 * Math.pow(mph, 0.771) * 0.3048;
+}
+function eyeMetres(){ return eyeMetresFor(smoothMph); }
+function backKmFor(mph){
+  const t = clamp((eyeMetresFor(mph) - 4) / 300, 0, 1);
+  return lerp(0.08, 1.6, t);
+}
+function backKm(){ return backKmFor(smoothMph); }
 const TERRAIN_EXAG= 1.35;  // must match map.setTerrain exaggeration (gentler = fewer "walls" at ground level)
 const PITCH_LEVEL = 84;    // neutral gaze when terrain is flat — near-horizon, ~15° above terrain
 const PITCH_LO    = 72;    // max downward tilt (steep descent — look into the valley)
@@ -506,7 +525,14 @@ function updateSpeedUI(){
   if(typeof slowBtn!=='undefined' && slowBtn) slowBtn.disabled = (mphIdx===0);
   if(typeof fastBtn!=='undefined' && fastBtn) fastBtn.disabled = (mphIdx===MPH_STEPS.length-1);
 }
-function changeSpeed(delta){ mphIdx=clamp(mphIdx+delta, 0, MPH_STEPS.length-1); updateSpeedUI(); }
+function changeSpeed(delta){
+  mphIdx=clamp(mphIdx+delta, 0, MPH_STEPS.length-1); updateSpeedUI();
+  if(map && camView && !playing){
+    if(camRAF){ cancelAnimationFrame(camRAF); camRAF=null; }
+    const v = computeView(current, currentMph());
+    viewLerpAnim({...camView}, v, 800);
+  }
+}
 
 const lerp=(a,b,t)=>a+(b-a)*t;
 function lerpAngle(a,b,t){ let d=((b-a+540)%360)-180; return a+d*t; }
@@ -525,25 +551,40 @@ function groundVisual(lngLat, fallbackRealElev){
   return e;
 }
 // The ground-level view (camera position + look angle) for a given day.
-function computeView(n){
+function computeView(n, mph){
   const w=waypoints[n], next=waypoints[n+1], prev=waypoints[n-1];
-  let bearing;
-  if(next && (next.coords[0]!==w.coords[0]||next.coords[1]!==w.coords[1])) bearing=bearingTo(w.coords,next.coords);
-  else if(n===waypoints.length-1) bearing=345;            // toward K2 at base camp
-  else if(prev) bearing=bearingTo(prev.coords,w.coords);  // rest day: keep looking onward
-  else bearing=25;
-  const camLL = destPoint(w.coords, (bearing+180)%360, BACK_KM);
-  // Stay low to the ground, but lift just enough to clear the nearest rise in
-  // the look direction so the view opens onto scenery instead of a dirt wall.
-  let alt = groundVisual(camLL, w.elev) + EYE_M;
-  let maxAhead = -Infinity;
-  for(const d of [0.6, 1.2, 2.0, 3.0]){
-    maxAhead = Math.max(maxAhead, groundVisual(destPoint(w.coords, bearing, d), w.elev));
+  let bearing = null;
+
+  // When the route polyline is available, derive bearing from the actual road
+  // direction so the settled view aligns with where pathFollowAnim will head.
+  if(routeReady && dayIdx[n] != null){
+    const idx = dayIdx[n];
+    const end = cumDist[cumDist.length-1];
+    const ahead = pointAtDist(clamp(cumDist[idx] + 1.0, 0, end));
+    if(distanceKm(w.coords, [ahead[0], ahead[1]]) > 0.01)
+      bearing = bearingTo(w.coords, [ahead[0], ahead[1]]);
   }
-  alt = Math.max(alt, maxAhead + 80);
+  // Fallback: straight-line to next waypoint, or special cases.
+  if(bearing == null){
+    if(n===waypoints.length-1) bearing=345;
+    else if(next && (next.coords[0]!==w.coords[0]||next.coords[1]!==w.coords[1])) bearing=bearingTo(w.coords,next.coords);
+    else if(prev) bearing=bearingTo(prev.coords,w.coords);
+    else bearing=25;
+  }
+  const eye = mph ? eyeMetresFor(mph) : eyeMetres();
+  const bk  = mph ? backKmFor(mph)    : backKm();
+  const camLL = destPoint(w.coords, (bearing+180)%360, bk);
+  let alt = groundVisual(camLL, w.elev) + eye;
+  let maxAhead = -Infinity;
+  const lookScale = clamp(eye / 60, 0.15, 1);
+  for(const d of [0.6, 1.2, 2.0, 3.0]){
+    maxAhead = Math.max(maxAhead, groundVisual(destPoint(w.coords, bearing, d * lookScale), w.elev));
+  }
+  alt = Math.max(alt, maxAhead + eye * 0.4);
+  const groundAlt = alt - eye;
   // Tilt to match the terrain slope ahead (toward the look direction).
   const pitch = topoPitch(camLL, w.elev, destPoint(w.coords, bearing, 1.0), w.elev);
-  return {lng:camLL[0], lat:camLL[1], alt, pitch, bearing};
+  return {lng:camLL[0], lat:camLL[1], alt, pitch, bearing, _groundAlt: groundAlt};
 }
 function applyView(v){
   const opts = map.getFreeCameraOptions();
@@ -882,11 +923,12 @@ function flyToDay(n, animate=true){
   if(camRAF){ cancelAnimationFrame(camRAF); camRAF=null; }
 
   const fromDay=lastDay; lastDay=n;
-  const target=computeView(n);
+  const target=computeView(n, currentMph());
   const isLast=(n===waypoints.length-1);
 
   // No animation, or no prior view → settle directly.
   if(!animate || !camView){
+    smoothMph = currentMph();
     applyView(target); camView=target;
     if(isLast) startOrbit(target);
     return 0;
@@ -914,33 +956,42 @@ function pathFollowAnim(aIdx, bIdx, totalKm, target, onEnd){
   const dir = bIdx>=aIdx ? 1 : -1;
   const dA=cumDist[aIdx];
   const lo=Math.min(cumDist[aIdx],cumDist[bIdx]), hi=Math.max(cumDist[aIdx],cumDist[bIdx]);
-  const lookKm=clamp(totalKm*0.05, 0.8, 4);
-  const slopeKm=0.4;   // short sample for terrain slope (stays within loaded tiles)
+  const slopeKm=0.4;
   const startView={...camView};
-  let travelledKm=0, lastT=performance.now(), prevPitch=startView.pitch;
+  let travelledKm=0, lastT=performance.now();
+  let prevPitch=startView.pitch, prevBearing=startView.bearing;
   function frame(t){
     if(paused){ lastT=t; camRAF=requestAnimationFrame(frame); return; }
     const dt=(t-lastT)/1000; lastT=t;
-    travelledKm += (currentMph()*1.60934/3600)*dt;
+    tickSmooth(dt);
+    travelledKm += (smoothMph*1.60934/3600)*dt;
     const k=clamp(travelledKm/totalKm, 0, 1);
     const dist=dA + dir*k*totalKm;
     const p=pointAtDist(dist);
+    // Look-ahead scales with speed: tight to the trail at walking pace,
+    // wider at high speed for a stable sweeping view.
+    const lookKm = clamp(totalKm*0.05, 0.3, 1.5) * clamp(smoothMph/30, 0.5, 3);
     const pa=pointAtDist(clamp(dist + dir*lookKm, lo, hi));
     const ps=pointAtDist(clamp(dist + dir*slopeKm, lo, hi));
-    let bearing = (pa[0]===p[0]&&pa[1]===p[1]) ? startView.bearing : bearingTo([p[0],p[1]],[pa[0],pa[1]]);
-    const alt = Math.max(groundVisual([p[0],p[1]],p[2]), groundVisual([pa[0],pa[1]],pa[2])) + EYE_M;
-    // Pitch from the short-range slope sample, smoothed to avoid jitter.
+    // Frame-rate-independent exponential smoothing for bearing and pitch.
+    const bSmooth = 1 - Math.exp(-4 * dt);   // bearing: ~63 % in 250 ms
+    const pSmooth = 1 - Math.exp(-3 * dt);   // pitch:   ~63 % in 333 ms
+    const rawBearing = (pa[0]===p[0]&&pa[1]===p[1]) ? prevBearing : bearingTo([p[0],p[1]],[pa[0],pa[1]]);
+    const bearing = lerpAngle(prevBearing, rawBearing, bSmooth); prevBearing=bearing;
+    const alt = Math.max(groundVisual([p[0],p[1]],p[2]), groundVisual([pa[0],pa[1]],pa[2])) + eyeMetres();
     const rawPitch = topoPitch([p[0],p[1]], p[2], [ps[0],ps[1]], ps[2]);
-    const pitch = lerp(prevPitch, rawPitch, 0.08); prevPitch=pitch;
+    const pitch = lerp(prevPitch, rawPitch, pSmooth); prevPitch=pitch;
     let v={lng:p[0], lat:p[1], alt, pitch, bearing};
-    if(k<0.12){ const b=k/0.12; v.bearing=lerpAngle(startView.bearing,v.bearing,b); v.alt=lerp(startView.alt,v.alt,b); v.pitch=lerp(startView.pitch,v.pitch,b); }
+    if(k<0.12){ const b=k/0.12; v.alt=lerp(startView.alt,v.alt,b); v.pitch=lerp(startView.pitch,v.pitch,b); }
     if(target && k>0.8){
       const b=easeInOutCubic((k-0.8)/0.2);
-      v={ lng:lerp(v.lng,target.lng,b), lat:lerp(v.lat,target.lat,b), alt:lerp(v.alt,target.alt,b),
+      const tAlt = (target._groundAlt != null) ? target._groundAlt + eyeMetres() : target.alt;
+      v={ lng:lerp(v.lng,target.lng,b), lat:lerp(v.lat,target.lat,b), alt:lerp(v.alt,tAlt,b),
           pitch:lerp(v.pitch,target.pitch,b), bearing:lerpAngle(v.bearing,target.bearing,b) };
     }
     applyView(v); camView=v;
-    if(k<1) camRAF=requestAnimationFrame(frame); else { camView=target||v; applyView(camView); onEnd&&onEnd(); }
+    if(k<1) camRAF=requestAnimationFrame(frame);
+    else { const fin=target?{...target, alt:(target._groundAlt!=null)?target._groundAlt+eyeMetres():target.alt}:v; camView=fin; applyView(camView); onEnd&&onEnd(); }
   }
   camRAF=requestAnimationFrame(frame);
 }
@@ -950,7 +1001,9 @@ function viewLerpAnim(from, target, dur, onEnd){
   let elapsed=0, lastT=performance.now();
   function frame(t){
     if(paused){ lastT=t; camRAF=requestAnimationFrame(frame); return; }
+    const dtS=(t-lastT)/1000;
     elapsed += t-lastT; lastT=t;
+    tickSmooth(dtS);
     const k=clamp(elapsed/dur,0,1), e=easeInOutCubic(k);
     const v={
       lng:lerp(from.lng,target.lng,e), lat:lerp(from.lat,target.lat,e),
@@ -973,7 +1026,9 @@ function startOrbit(view){
   let elapsed=0, lastT=performance.now();
   function frame(t){
     if(paused){ lastT=t; orbitRAF=requestAnimationFrame(frame); return; }
+    const dtS=(t-lastT)/1000;
     elapsed+=t-lastT; lastT=t;
+    tickSmooth(dtS);
     const k=clamp(elapsed/span,0,1), e=easeInOutCubic(k);
     const b=startBrng + sweep*e;
     const camLL=destPoint(pivot, b, radiusKm);
