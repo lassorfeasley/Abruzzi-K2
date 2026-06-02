@@ -1,0 +1,22 @@
+export const $ = id => document.getElementById(id);
+
+export const dayCounter = $('dayCounter');
+export const locName = $('locName');
+export const elevEl = $('elev');
+export const descEl = $('desc');
+export const banner = $('banner');
+export const progressWrap = $('progressWrap');
+export const progressFill = $('progressFill');
+export const progressThumb = $('progressThumb');
+export const progressTicks = $('progressTicks');
+export const progressLabels = $('progressLabels');
+export const prevBtn = $('prevBtn');
+export const nextBtn = $('nextBtn');
+export const playBtn = $('playBtn');
+export const captionEl = $('caption');
+export const loadingEl = $('loading');
+export const toastEl = $('toast');
+export const slowBtn = $('slowBtn');
+export const fastBtn = $('fastBtn');
+export const speedLabel = $('speedLabel');
+export const modeBtn = $('modeBtn');
