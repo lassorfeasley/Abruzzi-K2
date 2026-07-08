@@ -8,16 +8,29 @@ import { pointAtDist } from './route.js';
 
 export const SMOOTH_RATE = 3;
 export const TERRAIN_EXAG = 1.35;
-const PITCH_LEVEL = 84;
-const PITCH_LO = 72;
-const PITCH_HI = 85;
+
+// Perf mode flies a touch flatter: at pitch 84-85 the camera sees to the
+// horizon and Mapbox must load/draw a huge cone of terrain tiles.
+function pitchLevels() {
+  return state.perfMode
+    ? { level: 78, lo: 68, hi: 80 }
+    : { level: 84, lo: 72, hi: 85 };
+}
 
 export const MPH_STEPS = [2, 5, 15, 30, 60, 120, 300, 600];
 export const STEP_MIN_MS = 3000;
 export const DWELL_MS = 1600;
 
-const SKY_NIGHT = { range: [0.5, 10], color: '#c9b98e', 'high-color': '#0a0a12', 'horizon-blend': 0.06, 'space-color': '#000000', 'star-intensity': 0.9 };
-const SKY_DAY = { range: [0.5, 12], color: '#d7dde2', 'high-color': '#5b86c4', 'horizon-blend': 0.18, 'space-color': '#b9d2ec', 'star-intensity': 0.0 };
+const SKY_NIGHT = { color: '#c9b98e', 'high-color': '#0a0a12', 'horizon-blend': 0.06, 'space-color': '#000000', 'star-intensity': 0.9 };
+const SKY_DAY = { color: '#d7dde2', 'high-color': '#5b86c4', 'horizon-blend': 0.18, 'space-color': '#b9d2ec', 'star-intensity': 0.0 };
+
+// Fog range doubles as a tile cull: Mapbox skips tiles fully inside fog, so a
+// tighter range means far fewer tiles rendered at high pitch. Perf mode pulls
+// the horizon in harder (and blends a little wider to hide the nearer edge).
+function fogRange() {
+  if (state.perfMode) return state.isNight ? [0.5, 5] : [0.5, 6.5];
+  return state.isNight ? [0.5, 8] : [0.5, 10];
+}
 
 export function currentMph() { return MPH_STEPS[state.mphIdx]; }
 
@@ -52,8 +65,22 @@ function topoPitch(fromLL, fromElev, toLL, toElev) {
   const g1 = groundVisual(toLL, toElev);
   const slopeDeg = Math.atan2(g1 - g0, distM) * 180 / Math.PI;
   const t = clamp(slopeDeg / 8, -1, 1);
-  if (t >= 0) return lerp(PITCH_LEVEL, PITCH_HI, t);
-  return lerp(PITCH_LEVEL, PITCH_LO, -t);
+  const p = pitchLevels();
+  if (t >= 0) return lerp(p.level, p.hi, t);
+  return lerp(p.level, p.lo, -t);
+}
+
+// Aged-imagery color grade, done with raster paint properties so it happens
+// inside the existing satellite draw call — replaces the old CSS filter on
+// the canvas, which cost a full-screen post-processing pass every frame.
+function applyRasterGrade() {
+  const m = state.map;
+  if (!m || !m.getLayer || !m.getLayer('satellite')) return;
+  try {
+    m.setPaintProperty('satellite', 'raster-saturation', state.isNight ? -0.3 : -0.06);
+    m.setPaintProperty('satellite', 'raster-brightness-max', state.isNight ? 0.9 : 1);
+    m.setPaintProperty('satellite', 'raster-contrast', state.isNight ? 0.04 : 0);
+  } catch (e) { console.warn('Raster grade skipped:', e); }
 }
 
 export function applySky() {
@@ -63,7 +90,12 @@ export function applySky() {
     modeBtn.textContent = state.isNight ? '☾' : '☀';
     modeBtn.setAttribute('aria-label', state.isNight ? 'Switch to day' : 'Switch to night');
   }
-  if (state.map && state.map.setFog) state.map.setFog(state.isNight ? SKY_NIGHT : SKY_DAY);
+  if (state.map && state.map.setFog) {
+    const fog = { ...(state.isNight ? SKY_NIGHT : SKY_DAY), range: fogRange() };
+    if (state.perfMode) fog['horizon-blend'] = state.isNight ? 0.1 : 0.22;
+    state.map.setFog(fog);
+  }
+  applyRasterGrade();
 }
 
 export function toggleMode() { state.isNight = !state.isNight; applySky(); }

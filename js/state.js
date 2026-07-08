@@ -27,6 +27,7 @@ const state = {
   smoothMph: 30,
   mphIdx: 3,
   isNight: true,
+  perfMode: false,
 
   _dragActive: false,
   _dragX: 0,

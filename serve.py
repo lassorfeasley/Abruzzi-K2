@@ -54,13 +54,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return
         return super().do_GET()
 
+    def end_headers(self):
+        # Dev server: never let the browser cache static assets, so edits to
+        # JS/CSS/HTML always show on a normal reload (no hard-refresh needed).
+        self.send_header("Cache-Control", "no-store, must-revalidate")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        super().end_headers()
+
     def _serve_config(self):
         body = "window.ENV = " + json.dumps(load_env()) + ";\n"
         data = body.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/javascript; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
-        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 

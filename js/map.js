@@ -4,6 +4,7 @@ import state from './state.js';
 import { $ } from './dom.js';
 import { applySky, flyToDay, setupCameraDrag } from './camera.js';
 import { buildRoute } from './route.js';
+import { startFpsMonitor } from './perf.js';
 
 export function hideLabels() {
   try {
@@ -96,7 +97,11 @@ export function initMap() {
     style: 'mapbox://styles/mapbox/satellite-streets-v12',
     bounds,
     fitBoundsOptions: { padding: 60 },
-    pitch: 50, bearing: 25, maxPitch: 85, antialias: true, projection: 'globe'
+    pitch: 50, bearing: 25, maxPitch: 85, projection: 'globe',
+    // No `antialias`: MSAA is expensive on integrated GPUs. Render resolution
+    // is capped by clamping window.devicePixelRatio in perf.js before this runs
+    // (the Map `pixelRatio` option is ignored by GL JS v3.7 for the live canvas).
+    fadeDuration: state.perfMode ? 0 : 150
   });
 
   state.map.on('error', e => {
@@ -106,7 +111,9 @@ export function initMap() {
   });
 
   state.map.on('load', async () => {
-    state.map.addSource('mapbox-dem', { type: 'raster-dem', url: 'mapbox://mapbox.mapbox-terrain-dem-v1', tileSize: 512, maxzoom: 14 });
+    // maxzoom 12 (was 14): ~4x fewer DEM tiles; mesh detail loss is minor at
+    // flythrough altitudes.
+    state.map.addSource('mapbox-dem', { type: 'raster-dem', url: 'mapbox://mapbox.mapbox-terrain-dem-v1', tileSize: 512, maxzoom: 12 });
     state.map.setTerrain({ source: 'mapbox-dem', exaggeration: 1.35 });
     applySky();
     hideLabels();
@@ -119,7 +126,10 @@ export function initMap() {
     ui.bindUI();
     ui.render();
     flyToDay(0, false);
-    state.map.once('idle', () => { if (state.current === 0) flyToDay(0, false); });
+    state.map.once('idle', () => {
+      if (state.current === 0) flyToDay(0, false);
+      startFpsMonitor();
+    });
 
     buildRoute();
   });
